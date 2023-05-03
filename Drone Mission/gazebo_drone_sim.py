@@ -6,17 +6,17 @@ import firebase_admin as firebase
 from firebase_admin import credentials
 from firebase_admin import firestore
 
+#json dosyasinin konumu
 CERTIFICATE = "/home/irene/catkin_ws/src/beginner_tutorials/scripts/database.json"
 cred = credentials.Certificate(CERTIFICATE)
 firebase.initialize_app(cred)
 database = firestore.client()
-database.collection("arananlar").document("arananDrone").update({"bulundu":False})
+database.collection("arananlar").document("aranan").update({"bulundu":False})
 
 #libs for image processing
 import cv2
 import numpy as np
-from sensor_msgs.msg import Image
-import sys
+from threading import Thread
 
 #ros libs
 import rospy
@@ -62,7 +62,7 @@ def globalpose_callback(pose_info):
     rel_longitude=pose_info.longitude
     rel_altitude=pose_info.altitude
 
-    database.collection("arananlar").document("arananDrone").update({"location":GeoPoint(rel_latitude, rel_longitude)})
+    database.collection("arananlar").document("aranan").update({"location":GeoPoint(rel_latitude, rel_longitude)})
 
 def localpose_callback(pose_info):
     global localx,localy,localz
@@ -123,7 +123,7 @@ class fcumodes:
         global globalposepub
         rospy.wait_for_service('/mavros/set_mode')
         cnt=controller()
-        rate = rospy.Rate (5.0)
+        rate = rospy.Rate(5.0)
         k=0
         while k<10:
             globalposepub.publish(cnt.information_pub)
@@ -256,7 +256,7 @@ def moving_center():
                 vel_msg.velocity.y = 0
                 velocity_pub.publish (vel_msg)
                 rate.sleep()
-                database.collection("arananlar").document("arananDrone").update({"bulundu_loc":GeoPoint(rel_latitude, rel_longitude), "bulundu":True})
+                database.collection("arananlar").document("aranan").update({"bulundu_loc":GeoPoint(rel_latitude, rel_longitude), "bulundu":True})
                 modes.loiter_mode()
                 rospy.sleep(10)
                 modes.offboard_mode()
@@ -265,9 +265,7 @@ def moving_center():
                 print("COLLECTING GARBAGE")
                 rospy.sleep(30)
                 modes.offboard_mode()
-                MoveZ(6)
-                MoveX(2)
-                print("SERVO DROPPED PACK")
+                MoveZ(8)
                 modes.auto_rtl()
                 rospy.sleep(20)
                 modes.auto_landmode()
@@ -288,81 +286,67 @@ upper2 = np.array([122,250,255])
 color_found = False
 konum = 6 
 
-def imgmsg_to_cv2(img_msg):
-    dtype = np.dtype("uint8") # Hardcode to 8 bits...
-    dtype = dtype.newbyteorder('>' if img_msg.is_bigendian else '<')
-    image_opencv = np.ndarray(shape=(img_msg.height, img_msg.width, 3), # and three channels of data. Since OpenCV works with bgr natively, we don't need to reorder the channels.
-                    dtype=dtype, buffer=img_msg.data)
-    # If the byt order is different between the message and the system.
-    if img_msg.is_bigendian == (sys.byteorder == 'little'):
-        image_opencv = image_opencv.byteswap().newbyteorder()
-        
-    return cv2.cvtColor(image_opencv, cv2.COLOR_RGB2BGR)
-    
-def image_callback(rosmsg):
+def image_callback():
     global  lower, upper, lower2, upper2, konum, color_found
-
-    img = imgmsg_to_cv2(rosmsg)
-    img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
+    camSet = 'nvarguscamerasrc !  video/x-raw(memory:NVMM), width=3264, height=2464, ' \
+             'format=NV12, framerate=21/1 ! nvvidconv flip-method=' + "2" + \
+             ' ! video/x-raw, width=' + "1024" + ', height=' + "768" + \
+             ', format=BGRx ! videoconvert ! video/x-raw, format=BGR ! appsink'
     
-    #mask the image (get what you want from image)
-    #img_hsv because mask can be applied to hsv
-    mask = cv2.inRange(img_hsv, lower, upper)
-    mask2 = cv2.inRange(img_hsv, lower2, upper2)
-    
-    #define kernel size  
-    kernel = np.ones((7,7),np.uint8)
+    cap = cv2.VideoCapture (camSet)
 
-    # Remove unnecessary noise from mask
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask2 = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel)
-    mask2 = cv2.morphologyEx(mask2, cv2.MORPH_OPEN, kernel)
-    masked = cv2.bitwise_or(mask,mask2)
+    while not rospy.is_shutdown():
+        img = cap.read()
+        img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    #get intersection of img and masked img and apply it to img
-    result = cv2.bitwise_and(img, img, mask=masked)
-
-    # Determine if one of them exists
-    if cv2.countNonZero(mask) or cv2.countNonZero(mask2):
-        color_found = True
-        contours, _hierarchy = cv2.findContours(masked, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        c = max(contours, key=cv2.contourArea)
-
-        ((x, y), r) = cv2.minEnclosingCircle(c)
-        centerx = int (x)
-        centery = int (y)
         
-        cv2.circle(result, (centerx,centery), int(r), (0,0,255), 2)
+        #mask the image (get what you want from image)
+        #img_hsv because mask can be applied to hsv
+        mask = cv2.inRange(img_hsv, lower, upper)
+        mask2 = cv2.inRange(img_hsv, lower2, upper2)
+        
+        #define kernel size  
+        kernel = np.ones((7,7),np.uint8)
 
-        if (centerx < 350 and centery > 350 and centery < 450):
-            konum = 4
-        elif (centerx < 350 and centery < 350):
-            konum = 5
-        elif (centerx > 350 and centerx < 450 and centery < 350):
-            konum = 6
-        elif (centerx > 450 and centery < 350):
-            konum = 7
-        elif (centerx < 350 and centery > 450):
-            konum = 3
-        elif (centerx < 450 and centerx > 350 and centery > 450):
-            konum = 2
-        elif (centerx > 450 and centery > 450):
-            konum = 1
-        elif (centerx > 450 and centery > 350 and centery < 450):
-            konum = 8
-        elif (centerx > 350 and centerx < 475 and centery < 475 and centery > 350):
-            konum = 0
-            print ("-------------CENTER------------")
+        # Remove unnecessary noise from mask
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask2 = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel)
+        mask2 = cv2.morphologyEx(mask2, cv2.MORPH_OPEN, kernel)
 
-    img = cv2.resize(img, (300,300))
-    result = cv2.resize(result, (300,300))
-    horizontal = np.hstack((img, result))
+        #mask + mask2
+        masked = cv2.bitwise_or(mask,mask2)
+
+        # Determine if one of them exists
+        if cv2.countNonZero(mask) and cv2.countNonZero(mask2):
+            color_found = True
+            contours, _ = cv2.findContours(masked, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            c = max(contours, key=cv2.contourArea)
+
+            ((x, y), _) = cv2.minEnclosingCircle(c)
+            centerx = int(x)
+            centery = int(y)
+            
+            if (centerx < 350 and centery > 350 and centery < 450):
+                konum = 4
+            elif (centerx < 350 and centery < 350):
+                konum = 5
+            elif (centerx > 350 and centerx < 450 and centery < 350):
+                konum = 6
+            elif (centerx > 450 and centery < 350):
+                konum = 7
+            elif (centerx < 350 and centery > 450):
+                konum = 3
+            elif (centerx < 450 and centerx > 350 and centery > 450):
+                konum = 2
+            elif (centerx > 450 and centery > 450):
+                konum = 1
+            elif (centerx > 450 and centery > 350 and centery < 450):
+                konum = 8
+            elif (centerx > 350 and centerx < 475 and centery < 475 and centery > 350):
+                konum = 0
+                print ("-------------CENTER------------")
     
-    # Showing the output
-    cv2.imshow("Output", horizontal)
-    cv2.waitKey(1)
 
 #############################################
 ############################################
@@ -380,8 +364,10 @@ def mission():
     rospy.Subscriber('mavros/state',State,status_callback)
     rospy.Subscriber('mavros/local_position/pose',PoseStamped,localpose_callback)
     rospy.Subscriber('mavros/altitude',Altitude,amsl_callback)
-    rospy.Subscriber("/iris/camera/rgb/image_raw", Image, image_callback)
-    rospy.sleep
+    rospy.sleep(2)
+
+    #start camera as thread
+    Thread(target=image_callback).start()
 
     modes.setarm()
     rospy.sleep(2)
@@ -389,72 +375,17 @@ def mission():
     rospy.sleep(10)
     modes.offboard_mode()
 
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
+    movex = 1
+    for _ in range(10):
+        for _ in range(10):
+            MoveX(movex)
+            moving_center()
 
-    MoveY(2)
-    moving_center()
+        MoveY(1)
+        moving_center()
+        movex = -movex
 
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-
-    MoveY(2)
-    moving_center()
-        
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-
-    MoveY(2)
-    moving_center()
-
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-    MoveX(2)
-    moving_center()
-
-    MoveY(2)
-    moving_center()
-
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
-    MoveX(-2)
-    moving_center()
+ 
 
 if __name__=="__main__":
     try: mission()
